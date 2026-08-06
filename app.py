@@ -1,4 +1,5 @@
-#V1.0
+#V1.1
+
 from __future__ import annotations
 
 import html
