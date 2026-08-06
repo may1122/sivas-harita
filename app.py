@@ -12,16 +12,24 @@ import streamlit as st
 import streamlit.components.v1 as components
 from folium import FeatureGroup
 from folium.plugins import Fullscreen, MeasureControl
-from shapely.geometry import Point, Polygon, MultiPolygon
+from shapely.geometry import LineString, Point, Polygon, MultiPolygon
 from shapely.ops import unary_union
 
 # =========================================================
 # AYÇA SİVAS ECZANE GRUP HARİTASI
-# VERSION : V2.0
+# VERSION : V2.1
 # DATE    : 06.08.2026
 #
 # CHANGELOG
 # ---------------------------------------------------------
+# V2.1
+# - Aynı alt gruptaki yakın eczaneler küme halinde sınır içine alınır.
+# - Bir küme en az 3 eczaneden oluşur.
+# - Yakında 5, 6, 7 veya daha fazla aynı alt grup eczanesi varsa
+#   tamamı tek sınır içinde gösterilir.
+# - Uzak kümeler dev bir alanla birbirine bağlanmaz.
+# - Diğer grup eczanelerinin çevresi sınır geometrisinden çıkarılır.
+#
 # V2.0
 # - Grup Excel bağımlılığı tamamen kaldırıldı.
 # - A1-D4 grupları doğrudan app.py içine gömüldü.
@@ -317,37 +325,216 @@ def xy_to_latlon(
     return latitude, longitude
 
 
-def calculate_local_radius(
-    row_index: int,
+def point_distance(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    return math.hypot(second[0] - first[0], second[1] - first[1])
+
+
+def create_initial_clusters(
+    indices: list[int],
+    points_xy: list[tuple[float, float]],
+    connection_distance_m: float = 350.0,
+) -> list[list[int]]:
+    """
+    Aynı alt gruptaki eczaneleri yakınlık ağına göre kümeler.
+
+    Zincirleme yakınlık geçerlidir: A, B'ye; B de C'ye yakınsa
+    üçü aynı kümede değerlendirilir.
+    """
+    adjacency: dict[int, list[int]] = {index: [] for index in indices}
+
+    for position, first_index in enumerate(indices):
+        for second_index in indices[position + 1:]:
+            distance = point_distance(
+                points_xy[first_index],
+                points_xy[second_index],
+            )
+            if distance <= connection_distance_m:
+                adjacency[first_index].append(second_index)
+                adjacency[second_index].append(first_index)
+
+    clusters: list[list[int]] = []
+    visited: set[int] = set()
+
+    for start_index in indices:
+        if start_index in visited:
+            continue
+
+        stack = [start_index]
+        visited.add(start_index)
+        cluster: list[int] = []
+
+        while stack:
+            current = stack.pop()
+            cluster.append(current)
+
+            for neighbour in adjacency[current]:
+                if neighbour not in visited:
+                    visited.add(neighbour)
+                    stack.append(neighbour)
+
+        clusters.append(sorted(cluster))
+
+    return clusters
+
+
+def cluster_distance(
+    first_cluster: list[int],
+    second_cluster: list[int],
+    points_xy: list[tuple[float, float]],
+) -> float:
+    """İki küme arasındaki en yakın eczane mesafesini verir."""
+    return min(
+        point_distance(points_xy[first], points_xy[second])
+        for first in first_cluster
+        for second in second_cluster
+    )
+
+
+def enforce_minimum_cluster_size(
+    clusters: list[list[int]],
+    points_xy: list[tuple[float, float]],
+    minimum_size: int = 3,
+) -> list[list[int]]:
+    """
+    Üçten küçük kümeleri en yakın aynı alt grup kümesine birleştirir.
+
+    Böylece her sınır mümkün olduğunda en az üç eczaneyi kapsar.
+    Alt grubun toplam eczane sayısı üçten azsa mevcutların tamamı kullanılır.
+    """
+    clusters = [list(cluster) for cluster in clusters]
+
+    while len(clusters) > 1:
+        small_positions = [
+            position
+            for position, cluster in enumerate(clusters)
+            if len(cluster) < minimum_size
+        ]
+        if not small_positions:
+            break
+
+        source_position = min(
+            small_positions,
+            key=lambda position: len(clusters[position]),
+        )
+        source_cluster = clusters[source_position]
+
+        target_positions = [
+            position
+            for position in range(len(clusters))
+            if position != source_position
+        ]
+        target_position = min(
+            target_positions,
+            key=lambda position: cluster_distance(
+                source_cluster,
+                clusters[position],
+                points_xy,
+            ),
+        )
+
+        merged = sorted(source_cluster + clusters[target_position])
+
+        for position in sorted(
+            [source_position, target_position],
+            reverse=True,
+        ):
+            clusters.pop(position)
+        clusters.append(merged)
+
+    return sorted(clusters, key=lambda cluster: min(cluster))
+
+
+def nearest_other_group_distance(
+    point_index: int,
     points_xy: list[tuple[float, float]],
     groups: list[str],
 ) -> float:
+    current_group = groups[point_index]
+    distances = [
+        point_distance(points_xy[point_index], points_xy[other_index])
+        for other_index in range(len(points_xy))
+        if other_index != point_index
+        and groups[other_index] != current_group
+    ]
+    return min(distances) if distances else 200.0
+
+
+def build_cluster_geometry(
+    cluster: list[int],
+    points_xy: list[tuple[float, float]],
+    groups: list[str],
+) -> Polygon | MultiPolygon:
     """
-    Her eczane için sınır yarıçapı hesaplar.
+    Küme noktalarını ince koridorlarla bağlayarak sıkı bir sınır üretir.
 
-    - En yakın farklı grup eczanesinin mesafesinin %42'sini geçmez.
-    - Minimum 22 metre, maksimum 95 metre kullanır.
-    - Böylece büyük çemberler oluşmaz ve başka grup noktasına ulaşılmaz.
+    Dışbükey büyük alan kullanılmaz. Bu nedenle sınır boş bölgeleri
+    gereksiz yere kaplamaz.
     """
-    x1, y1 = points_xy[row_index]
-    current_group = groups[row_index]
+    point_radii: dict[int, float] = {}
+    for index in cluster:
+        nearest_other = nearest_other_group_distance(
+            index,
+            points_xy,
+            groups,
+        )
+        point_radii[index] = max(18.0, min(48.0, nearest_other * 0.32))
 
-    different_group_distances: list[float] = []
+    geometry_parts = [
+        Point(points_xy[index]).buffer(point_radii[index], resolution=18)
+        for index in cluster
+    ]
 
-    for other_index, (x2, y2) in enumerate(points_xy):
-        if other_index == row_index:
-            continue
-        if groups[other_index] == current_group:
-            continue
+    # Minimum spanning tree: noktaları en kısa toplam bağlantıyla birleştirir.
+    if len(cluster) >= 2:
+        connected = {cluster[0]}
+        remaining = set(cluster[1:])
 
-        distance = math.hypot(x2 - x1, y2 - y1)
-        different_group_distances.append(distance)
+        while remaining:
+            first, second, distance = min(
+                (
+                    connected_index,
+                    remaining_index,
+                    point_distance(
+                        points_xy[connected_index],
+                        points_xy[remaining_index],
+                    ),
+                )
+                for connected_index in connected
+                for remaining_index in remaining
+            )
 
-    if not different_group_distances:
-        return 65.0
+            corridor_width = max(
+                12.0,
+                min(
+                    30.0,
+                    point_radii[first] * 0.65,
+                    point_radii[second] * 0.65,
+                ),
+            )
+            geometry_parts.append(
+                LineString(
+                    [points_xy[first], points_xy[second]]
+                ).buffer(corridor_width, cap_style=1, join_style=1)
+            )
+            connected.add(second)
+            remaining.remove(second)
 
-    nearest_other_group = min(different_group_distances)
-    return max(22.0, min(95.0, nearest_other_group * 0.42))
+    geometry = unary_union(geometry_parts).buffer(0)
+
+    # Başka grupların eczane noktalarını sınırın dışında bırak.
+    cluster_group = groups[cluster[0]]
+    exclusion_areas = [
+        Point(points_xy[index]).buffer(16.0, resolution=14)
+        for index in range(len(points_xy))
+        if groups[index] != cluster_group
+    ]
+    if exclusion_areas:
+        geometry = geometry.difference(unary_union(exclusion_areas)).buffer(0)
+
+    return geometry.simplify(1.5, preserve_topology=True)
 
 
 def geometry_to_latlon(
@@ -367,7 +554,7 @@ def geometry_to_latlon(
     result: list[list[tuple[float, float]]] = []
 
     for polygon in polygons:
-        if polygon.is_empty:
+        if polygon.is_empty or polygon.area < 80.0:
             continue
 
         coordinates: list[tuple[float, float]] = []
@@ -389,12 +576,13 @@ def geometry_to_latlon(
 
 def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> None:
     """
-    Her alt grup için küçük yerel adalar oluşturur.
+    Her alt grubu yakınlık kümelerine ayırır.
 
-    Aynı gruptaki yakın eczanelerin alanları birleşebilir.
-    Uzak eczaneler dev bir sınırla birbirine bağlanmaz.
+    - Her küme en az 3 aynı alt grup eczanesinden oluşur.
+    - Yakında 5-6-7 eczane varsa tamamı aynı kümeye girer.
+    - Birbirinden uzak kümeler ayrı sınırlar olarak gösterilir.
     """
-    assigned_df = df.dropna(subset=["Grup"]).copy()
+    assigned_df = df.dropna(subset=["Grup"]).copy().reset_index(drop=True)
     if assigned_df.empty:
         return
 
@@ -412,46 +600,58 @@ def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> None:
     ]
     groups = assigned_df["Grup"].astype(str).tolist()
 
-    radii = [
-        calculate_local_radius(index, points_xy, groups)
-        for index in range(len(points_xy))
-    ]
-
-    assigned_df = assigned_df.reset_index(drop=True)
     boundary_layer = FeatureGroup(name="Alt grup sınırları", show=True)
 
-    for group_name, group_indices in assigned_df.groupby("Grup").groups.items():
+    for group_name, group_indices_value in assigned_df.groupby("Grup").groups.items():
         group_name = str(group_name)
+        group_indices = sorted(int(index) for index in group_indices_value)
+
+        clusters = create_initial_clusters(
+            group_indices,
+            points_xy,
+            connection_distance_m=350.0,
+        )
+        clusters = enforce_minimum_cluster_size(
+            clusters,
+            points_xy,
+            minimum_size=3,
+        )
+
         main_group = group_name[0]
         subgroup_number = group_name[1]
         color = MAIN_COLORS.get(main_group, "#616161")
 
-        local_areas = [
-            Point(points_xy[index]).buffer(radii[index], resolution=16)
-            for index in group_indices
-        ]
+        for cluster_number, cluster in enumerate(clusters, start=1):
+            geometry = build_cluster_geometry(
+                cluster,
+                points_xy,
+                groups,
+            )
 
-        geometry = unary_union(local_areas).buffer(0)
-        geometry = geometry.simplify(2.0, preserve_topology=True)
+            polygon_sets = geometry_to_latlon(
+                geometry,
+                reference_latitude,
+                reference_longitude,
+            )
 
-        polygon_sets = geometry_to_latlon(
-            geometry,
-            reference_latitude,
-            reference_longitude,
-        )
+            pharmacy_names = assigned_df.loc[cluster, "Eczane"].astype(str).tolist()
+            tooltip_text = (
+                f"{group_name} — {len(cluster)} eczane: "
+                + ", ".join(pharmacy_names)
+            )
 
-        for polygon_coordinates in polygon_sets:
-            folium.Polygon(
-                locations=polygon_coordinates,
-                color=color,
-                weight=2.2,
-                opacity=0.9,
-                dash_array=SUBGROUP_DASH.get(subgroup_number),
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.055,
-                tooltip=f"{group_name} sınırı",
-            ).add_to(boundary_layer)
+            for polygon_coordinates in polygon_sets:
+                folium.Polygon(
+                    locations=polygon_coordinates,
+                    color=color,
+                    weight=2.3,
+                    opacity=0.92,
+                    dash_array=SUBGROUP_DASH.get(subgroup_number),
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.06,
+                    tooltip=tooltip_text,
+                ).add_to(boundary_layer)
 
     boundary_layer.add_to(map_obj)
 
@@ -571,7 +771,7 @@ def build_map(df: pd.DataFrame) -> folium.Map:
 # =========================================================
 st.title("Sivas Eczane Grup Haritası")
 st.caption(
-    "V2.0 — Gruplar doğrudan app.py içindedir. "
+    "V2.1 — Yakın aynı alt grup eczaneleri en az üçlü kümeler halinde gösterilir. "
     "Eczane adı ve grubu yalnızca fareyle üzerine gelince görünür."
 )
 
