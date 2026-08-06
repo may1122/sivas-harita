@@ -1,11 +1,9 @@
-#V1.1 - grup çakışması / kayma düzeltmesi
 from __future__ import annotations
 
 import html
 import math
 import re
 import unicodedata
-from collections import defaultdict
 from pathlib import Path
 
 import folium
@@ -42,13 +40,6 @@ SUBGROUP_DASH = {
     "3": "12,5",
     "4": "2,5",
 }
-
-# Bir alt grup içinde, geri kalan noktalardan bu kat kadar uzak kalan
-# tek nokta(lar), sınır çiziminden (convex hull) hariç tutulur.
-# (Harita üzerindeki nokta/tooltip'ten hariç tutulmaz, sadece kesikli
-# sınır çizgisini o kadar germesin diye.)
-OUTLIER_DISTANCE_FACTOR = 3.0
-OUTLIER_MIN_ABS_METERS = 600.0
 
 
 def normalize_name(value: object) -> str:
@@ -120,15 +111,15 @@ def read_pharmacies(path: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def read_group_candidates(path: str) -> dict[str, list[str]]:
+def read_groups(path: str) -> dict[str, str]:
     """
-    SİVAS-GRUP dosyasındaki A/C ve B/D bloklarını okur ve her isim için
-    o isme rastlanan TÜM grup adaylarını (birden fazla olabilir) döndürür.
-    Aynı isim birden fazla grupta geçiyorsa, çakışma coğrafi olarak
-    resolve_group_conflicts() içinde çözülür.
+    SİVAS-GRUP dosyasındaki A/C ve B/D bloklarını okur.
+    Alt grup başlığının bulunduğu sütun ile bir sonraki başlık arasındaki
+    hücreleri aynı gruba dahil eder. Aynı isim birden fazla yerdeyse dosyada
+    ilk görülen grup esas alınır.
     """
     raw = pd.read_excel(path, header=None, engine="openpyxl")
-    candidates: dict[str, list[str]] = defaultdict(list)
+    group_map: dict[str, str] = {}
 
     header_rows: list[tuple[int, list[tuple[int, str]]]] = []
     for row_idx, row in raw.iterrows():
@@ -167,76 +158,11 @@ def read_group_candidates(path: str) -> dict[str, list[str]]:
                     key = normalize_name(value)
                     if not key or re.fullmatch(r"[ABCD][1-4]?", key):
                         continue
-                    candidates[key].append(group_name)
+                    group_map.setdefault(key, group_name)
 
-    if not candidates:
+    if not group_map:
         raise ValueError("Grup dosyasında A1–D4 grup yapısı bulunamadı.")
-    return dict(candidates)
-
-
-def resolve_group_conflicts(
-    candidates: dict[str, list[str]], pharmacies: pd.DataFrame
-) -> tuple[dict[str, str], list[dict[str, str]]]:
-    """
-    Bir eczane adı Excel'de birden fazla farklı grupta geçiyorsa (kopyala-yapıştır
-    hatası vb.), o eczanenin GERÇEK koordinatına en yakın grup merkezine göre
-    çakışmayı çözer. Bu, tek bir yanlış-gruplanmış eczanenin sınır çizgisini
-    haritanın öbür ucuna germesini (kaymasını) engeller.
-    """
-    coord_lookup = pharmacies.set_index("Anahtar")[["Latitude", "Longitude"]]
-
-    # 1) Belirsiz olmayan (tek gruba ait) isimlerden her grubun kaba merkezini kur.
-    unambiguous = {key: opts[0] for key, opts in candidates.items() if len(set(opts)) == 1}
-
-    group_points: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    for key, group in unambiguous.items():
-        if key in coord_lookup.index:
-            lat, lon = coord_lookup.loc[key, ["Latitude", "Longitude"]]
-            group_points[group].append((float(lat), float(lon)))
-
-    centroids = {
-        group: (
-            sum(p[0] for p in pts) / len(pts),
-            sum(p[1] for p in pts) / len(pts),
-        )
-        for group, pts in group_points.items()
-        if pts
-    }
-
-    # 2) Çakışmaları koordinata en yakın merkeze göre çöz.
-    final_map: dict[str, str] = dict(unambiguous)
-    conflicts_resolved: list[dict[str, str]] = []
-
-    for key, opts in candidates.items():
-        unique_groups = sorted(set(opts))
-        if len(unique_groups) <= 1:
-            continue
-
-        if key not in coord_lookup.index:
-            # Koordinatı olmayan bir eczane için ilk görülen grubu kullan.
-            final_map[key] = opts[0]
-            continue
-
-        lat, lon = coord_lookup.loc[key, ["Latitude", "Longitude"]]
-        lat, lon = float(lat), float(lon)
-
-        scored = [
-            (g, (lat - centroids[g][0]) ** 2 + (lon - centroids[g][1]) ** 2)
-            for g in unique_groups
-            if g in centroids
-        ]
-        best_group = min(scored, key=lambda item: item[1])[0] if scored else opts[0]
-
-        final_map[key] = best_group
-        conflicts_resolved.append(
-            {
-                "isim": key,
-                "excelde_gecen_gruplar": ", ".join(unique_groups),
-                "secilen_grup": best_group,
-            }
-        )
-
-    return final_map, conflicts_resolved
+    return group_map
 
 
 def meters_to_lat(meters: float) -> float:
@@ -245,17 +171,6 @@ def meters_to_lat(meters: float) -> float:
 
 def meters_to_lon(meters: float, latitude: float) -> float:
     return meters / (111_320.0 * max(math.cos(math.radians(latitude)), 0.2))
-
-
-def haversine_meters(p1: tuple[float, float], p2: tuple[float, float]) -> float:
-    lat1, lon1 = p1
-    lat2, lon2 = p2
-    r = 6_371_000.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
 def destination(center: tuple[float, float], bearing_deg: float, distance_m: float) -> tuple[float, float]:
@@ -324,49 +239,12 @@ def add_sector_guides(
     guides.add_to(map_obj)
 
 
-def split_outliers(group_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Bir alt grubun noktalarını, sınır (convex hull) çiziminde kullanılacak
-    "çekirdek" noktalar ve o grubun geri kalanından anormal uzak kalan
-    "aykırı" noktalar olarak ikiye ayırır. Aykırı noktalar haritada işaretçi
-    olarak görünmeye devam eder, sadece kesikli sınır çizgisini germez.
-    """
-    if len(group_df) < 4:
-        return group_df, group_df.iloc[0:0]
-
-    lat_c = group_df["Latitude"].median()
-    lon_c = group_df["Longitude"].median()
-    center = (lat_c, lon_c)
-
-    distances = group_df.apply(
-        lambda r: haversine_meters((r["Latitude"], r["Longitude"]), center), axis=1
-    )
-    median_dist = distances.median()
-    threshold = max(median_dist * OUTLIER_DISTANCE_FACTOR, OUTLIER_MIN_ABS_METERS)
-
-    is_outlier = distances > threshold
-    # Grubun yarısından fazlası "aykırı" çıkarsa muhtemelen asıl dağınık olan
-    # gruptur, hiçbir şeyi hariç tutma (güvenlik freni).
-    if is_outlier.sum() >= len(group_df) / 2:
-        return group_df, group_df.iloc[0:0]
-
-    return group_df[~is_outlier], group_df[is_outlier]
-
-
-def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> list[dict[str, str]]:
-    """Her alt grubun eczanelerini çevreleyen renkli sınırlar çizer.
-    Aşırı uzak kalan (aykırı) noktaları hariç tutarak sınırın haritanın
-    öbür ucuna kaymasını engeller. Hariç tutulanların listesini döndürür.
-    """
+def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> None:
+    """Her alt grubun eczanelerini çevreleyen renkli sınırlar çizer."""
     boundary_layer = FeatureGroup(name="Alt grup sınırları", show=True)
-    excluded_points: list[dict[str, str]] = []
 
     for group_name, group_df in df.dropna(subset=["Grup"]).groupby("Grup"):
-        core_df, outlier_df = split_outliers(group_df)
-        for _, row in outlier_df.iterrows():
-            excluded_points.append({"eczane": row["Eczane"], "grup": str(group_name)})
-
-        coords = list(zip(core_df["Longitude"], core_df["Latitude"]))
+        coords = list(zip(group_df["Longitude"], group_df["Latitude"]))
         if not coords:
             continue
 
@@ -410,10 +288,9 @@ def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> list[dict[str
         ).add_to(boundary_layer)
 
     boundary_layer.add_to(map_obj)
-    return excluded_points
 
 
-def build_map(df: pd.DataFrame) -> tuple[folium.Map, list[dict[str, str]]]:
+def build_map(df: pd.DataFrame) -> folium.Map:
     center = (float(df["Latitude"].median()), float(df["Longitude"].median()))
 
     map_obj = folium.Map(
@@ -446,7 +323,7 @@ def build_map(df: pd.DataFrame) -> tuple[folium.Map, list[dict[str, str]]]:
     max_radius_m = max(2500.0, max_degree * 111_320.0 * 1.08)
 
     add_sector_guides(map_obj, center, max_radius_m)
-    excluded_points = add_group_boundaries(map_obj, df)
+    add_group_boundaries(map_obj, df)
 
     pharmacy_layer = FeatureGroup(name="Eczaneler", show=True)
     for _, row in df.iterrows():
@@ -486,7 +363,7 @@ def build_map(df: pd.DataFrame) -> tuple[folium.Map, list[dict[str, str]]]:
         ],
         padding=(25, 25),
     )
-    return map_obj, excluded_points
+    return map_obj
 
 
 # =========================================================
@@ -510,8 +387,7 @@ if pharmacy_path is None or group_path is None:
 
 try:
     pharmacies = read_pharmacies(str(pharmacy_path))
-    group_candidates = read_group_candidates(str(group_path))
-    group_map, conflicts_resolved = resolve_group_conflicts(group_candidates, pharmacies)
+    group_map = read_groups(str(group_path))
     pharmacies["Grup"] = pharmacies["Anahtar"].map(group_map)
 
     # Görsel kontrolde kolaylık için grubu olmayanları ayrıca göster.
@@ -528,32 +404,7 @@ try:
         with st.expander(f"Grubu bulunamayan {missing_count} eczaneyi göster"):
             st.write(missing_names)
 
-    if conflicts_resolved:
-        with st.expander(
-            f"⚠️ Grup dosyasında birden fazla grupta geçen {len(conflicts_resolved)} eczane bulundu "
-            "(en yakın konuma göre otomatik çözüldü)"
-        ):
-            st.dataframe(pd.DataFrame(conflicts_resolved), hide_index=True, use_container_width=True)
-            st.caption(
-                "Bu isimler SİVAS-GRUP dosyasında birden fazla grup altında yazılmış. "
-                "Eczanenin gerçek koordinatına en yakın grup merkezi otomatik seçildi. "
-                "Doğru olduğundan emin olmak için Excel dosyasındaki mükerrer kayıtları kontrol edin."
-            )
-
-    pharmacy_map, excluded_points = build_map(pharmacies)
-
-    if excluded_points:
-        with st.expander(
-            f"ℹ️ {len(excluded_points)} eczane, kendi grubunun geri kalanından çok uzak "
-            "olduğu için sınır çiziminden hariç tutuldu"
-        ):
-            st.dataframe(pd.DataFrame(excluded_points), hide_index=True, use_container_width=True)
-            st.caption(
-                "Bu eczaneler haritada nokta olarak görünmeye devam ediyor, sadece kesikli "
-                "sınır çizgisini o kadar uzağa germiyor. Koordinat veya grup ataması hatalı "
-                "olabilir, kontrol etmenizi öneririz."
-            )
-
+    pharmacy_map = build_map(pharmacies)
     components.html(pharmacy_map.get_root().render(), height=900, scrolling=False)
 
 except Exception as exc:
