@@ -96,12 +96,12 @@ SUBGROUP_DASH = {
 # =========================================================
 GROUPS: dict[str, list[str]] = {
     "A1": [
-        "BESTE", "HİKMET", "GÜNEŞ", "KARACA", "KOÇAK",
+        "BESTE", "HİKMET", "ÖRNEKOL", "KARACA", "KOÇAK",
         "ALTINAY", "SELİN", "ÖZDEMİR",
     ],
     "A2": [
         "AYDOĞAN", "DERMAN", "DOLUNAY", "SEVGİ", "SERDAR",
-        "SEVİNÇ", "ZEHRA", "ÇİĞDEM", "ÖRNEKOL",
+        "SEVİNÇ", "ZEHRA", "ÇİĞDEM", "GÜNEŞ",
     ],
     "A3": [
         "AKASYA", "ANIL", "BAĞDAT", "EĞRİKÖPRÜ", "GÖĞEBAKAN",
