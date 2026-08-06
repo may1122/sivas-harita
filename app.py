@@ -24,8 +24,8 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-ECZANE_FILE_NAME = "nöbet-merkez tutan eczaneler.xlsx"
-GROUP_FILE_NAME = "SİVAS-GRUP.xlsx"
+ECZANE_FILE_NAME = "nöbet-merkez tutan eczaneler(20260806-122152).xlsx"
+GROUP_FILE_NAME = "SİVAS-GRUP(20260806-122152).xlsx"
 
 MAIN_COLORS = {
     "A": "#E53935",  # kırmızı
