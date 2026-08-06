@@ -148,10 +148,10 @@ GROUPS: dict[str, list[str]] = {
 
     "D1": [
         "CEREN", "EREN", "ESRA", "TUĞUT", "YÖRÜKOĞLU",
-        "ÇARŞI", "ÇOLAKOĞLU", "ŞENYURT", "KEPENEK",
+        "ÇARŞI", "ÇOLAKOĞLU", "LOKMAN", "KEPENEK",
     ],
     "D2": [
-        "AKYOL", "FERHAT", "LOKMAN", "İSTANBUL",
+        "AKYOL", "FERHAT", "ŞENYURT", "İSTANBUL",
         "MEVLANA", "MURAT", "ÜNAL", "GÜL",
     ],
     "D3": [
