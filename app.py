@@ -17,11 +17,16 @@ from shapely.ops import unary_union
 
 # =========================================================
 # AYÇA SİVAS ECZANE GRUP HARİTASI
-# VERSION : V2.1
+# VERSION : V2.2
 # DATE    : 06.08.2026
 #
 # CHANGELOG
 # ---------------------------------------------------------
+# V2.2
+# - A, B, C ve D ana grupları kendi renk ailesine ayrıldı.
+# - Her alt grup 1'den 4'e koyudan açığa farklı bir ton kullanır.
+# - Marker, sınır çizgisi ve dolgu aynı alt grup rengini kullanır.
+#
 # V2.1
 # - Aynı alt gruptaki yakın eczaneler küme halinde sınır içine alınır.
 # - Bir küme en az 3 eczaneden oluşur.
@@ -51,11 +56,30 @@ st.set_page_config(
 BASE_DIR = Path(__file__).resolve().parent
 ECZANE_FILE_NAME = "nöbet-merkez tutan eczaneler(20260806-122152).xlsx"
 
-MAIN_COLORS = {
-    "A": "#E53935",
-    "B": "#1E88E5",
-    "C": "#43A047",
-    "D": "#FB8C00",
+GROUP_COLORS = {
+    # A grubu: mavi tonları
+    "A1": "#0D47A1",
+    "A2": "#1976D2",
+    "A3": "#42A5F5",
+    "A4": "#90CAF9",
+
+    # B grubu: yeşil tonları
+    "B1": "#1B5E20",
+    "B2": "#388E3C",
+    "B3": "#66BB6A",
+    "B4": "#A5D6A7",
+
+    # C grubu: turuncu tonları
+    "C1": "#E65100",
+    "C2": "#F57C00",
+    "C3": "#FFB74D",
+    "C4": "#FFE0B2",
+
+    # D grubu: mor tonları
+    "D1": "#4A148C",
+    "D2": "#7B1FA2",
+    "D3": "#BA68C8",
+    "D4": "#E1BEE7",
 }
 
 SUBGROUP_DASH = {
@@ -617,9 +641,8 @@ def add_group_boundaries(map_obj: folium.Map, df: pd.DataFrame) -> None:
             minimum_size=3,
         )
 
-        main_group = group_name[0]
         subgroup_number = group_name[1]
-        color = MAIN_COLORS.get(main_group, "#616161")
+        color = GROUP_COLORS.get(group_name, "#616161")
 
         for cluster_number, cluster in enumerate(clusters, start=1):
             geometry = build_cluster_geometry(
@@ -667,12 +690,7 @@ def add_pharmacy_markers(map_obj: folium.Map, df: pd.DataFrame) -> None:
             else "Grupsuz"
         )
 
-        main_group = (
-            group_text[0]
-            if group_text and group_text[0] in MAIN_COLORS
-            else ""
-        )
-        color = MAIN_COLORS.get(main_group, "#757575")
+        color = GROUP_COLORS.get(group_text, "#757575")
 
         tooltip_html = (
             '<div style="font-size:14px; line-height:1.35;">'
