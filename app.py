@@ -720,6 +720,144 @@ def add_pharmacy_markers(map_obj: folium.Map, df: pd.DataFrame) -> None:
     pharmacy_layer.add_to(map_obj)
 
 
+
+def add_density_circle_widget(map_obj: folium.Map, df: pd.DataFrame) -> None:
+    """Haritada sürüklenebilir bir yoğunluk çemberi ve anlık eczane sayacı ekler."""
+    map_name = map_obj.get_name()
+
+    pharmacy_points = [
+        {
+            "name": str(row["Eczane"]),
+            "lat": float(row["Latitude"]),
+            "lon": float(row["Longitude"]),
+        }
+        for _, row in df.iterrows()
+    ]
+
+    center_lat = float(df["Latitude"].median())
+    center_lon = float(df["Longitude"].median())
+
+    import json
+    pharmacy_json = json.dumps(pharmacy_points, ensure_ascii=False)
+
+    widget_html = f"""
+    <style>
+      .ayca-density-panel {{
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 9999;
+        background: rgba(255,255,255,0.96);
+        border: 1px solid #d9d9d9;
+        border-radius: 10px;
+        padding: 12px 14px;
+        min-width: 220px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        font-family: Arial, sans-serif;
+        color: #222;
+      }}
+      .ayca-density-title {{
+        font-weight: 700;
+        font-size: 15px;
+        margin-bottom: 8px;
+      }}
+      .ayca-density-row {{
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        font-size: 14px;
+        margin: 5px 0;
+      }}
+      .ayca-density-value {{ font-weight: 700; }}
+      .ayca-density-slider {{
+        width: 100%;
+        margin-top: 8px;
+      }}
+      .ayca-density-hint {{
+        margin-top: 7px;
+        font-size: 11px;
+        color: #666;
+      }}
+    </style>
+
+    <div class="ayca-density-panel">
+      <div class="ayca-density-title">Yoğunluk Çemberi</div>
+      <div class="ayca-density-row"><span>Yarıçap</span><span class="ayca-density-value" id="ayca-radius-value">750 m</span></div>
+      <div class="ayca-density-row"><span>Çember içi</span><span class="ayca-density-value" id="ayca-count-value">0 eczane</span></div>
+      <div class="ayca-density-row"><span>Toplam içindeki oran</span><span class="ayca-density-value" id="ayca-share-value">0%</span></div>
+      <input id="ayca-radius-slider" class="ayca-density-slider" type="range" min="100" max="2000" step="50" value="750">
+      <div class="ayca-density-hint">Çemberin merkezini sürükleyin veya yarıçapı kaydırıcıdan değiştirin.</div>
+    </div>
+
+    <script>
+    (function() {{
+      const map = {map_name};
+      const pharmacies = {pharmacy_json};
+      const total = pharmacies.length;
+
+      const circle = L.circle([{center_lat}, {center_lon}], {{
+        radius: 750,
+        color: '#C62828',
+        weight: 3,
+        opacity: 0.9,
+        fillColor: '#EF5350',
+        fillOpacity: 0.10
+      }}).addTo(map);
+
+      const centerHandle = L.marker([{center_lat}, {center_lon}], {{
+        draggable: true,
+        title: 'Yoğunluk çemberini taşı'
+      }}).addTo(map);
+
+      function distanceMeters(lat1, lon1, lat2, lon2) {{
+        const R = 6371000;
+        const toRad = d => d * Math.PI / 180;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        return 2 * R * Math.asin(Math.sqrt(a));
+      }}
+
+      function updateDensity() {{
+        const center = circle.getLatLng();
+        const radius = circle.getRadius();
+        let count = 0;
+        pharmacies.forEach(p => {{
+          if (distanceMeters(center.lat, center.lng, p.lat, p.lon) <= radius) count++;
+        }});
+
+        document.getElementById('ayca-radius-value').textContent = Math.round(radius) + ' m';
+        document.getElementById('ayca-count-value').textContent = count + ' eczane';
+        document.getElementById('ayca-share-value').textContent = ((count / total) * 100).toFixed(1).replace('.', ',') + '%';
+      }}
+
+      centerHandle.on('drag', function(e) {{
+        circle.setLatLng(e.target.getLatLng());
+        updateDensity();
+      }});
+
+      const slider = document.getElementById('ayca-radius-slider');
+      slider.addEventListener('input', function() {{
+        circle.setRadius(Number(this.value));
+        updateDensity();
+      }});
+
+      map.on('click', function(e) {{
+        if (!e.originalEvent.shiftKey) return;
+        centerHandle.setLatLng(e.latlng);
+        circle.setLatLng(e.latlng);
+        updateDensity();
+      }});
+
+      updateDensity();
+    }})();
+    </script>
+    """
+
+    map_obj.get_root().html.add_child(folium.Element(widget_html))
+
 def build_map(df: pd.DataFrame) -> folium.Map:
     center = [
         float(df["Latitude"].median()),
@@ -750,6 +888,7 @@ def build_map(df: pd.DataFrame) -> folium.Map:
 
     add_group_boundaries(map_obj, df)
     add_pharmacy_markers(map_obj, df)
+    add_density_circle_widget(map_obj, df)
 
     Fullscreen(
         position="topright",
